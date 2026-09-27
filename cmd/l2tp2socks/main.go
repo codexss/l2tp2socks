@@ -39,7 +39,8 @@ func main() {
 	client := l2tp.NewClient(l2tp.Config{
 		Server: settings.L2TP.Server, L2TPPort: settings.L2TP.Port, DisableIPsec: true,
 		Username: settings.L2TP.Username, Password: settings.L2TP.Password,
-		MTU: settings.L2TP.MTU, Timeout: settings.L2TP.ConnectTimeout.Duration, Logger: logger,
+		Auth: settings.L2TP.Auth,
+		MTU:  settings.L2TP.MTU, Timeout: settings.L2TP.ConnectTimeout.Duration, Logger: logger,
 	})
 	session, err := client.Start(ctx)
 	if err != nil {

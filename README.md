@@ -16,7 +16,8 @@ VPN 会话向 SOCKS5 层提供标准的 `DialContext`/`ListenPacket` 接口。�
 ## 功能
 
 - 纯用户态 L2TPv2 LAC，默认连接 UDP/1701
-- PPP LCP、MS-CHAPv2 和 IPCP
+- PPP LCP、PAP、CHAP-MD5、MS-CHAPv2 和 IPCP
+- PPP 认证支持自动协商或强制指定方式
 - gVisor 用户态 TCP/IP 栈，无需管理员权限
 - SOCKS5 `CONNECT` 和 `UDP ASSOCIATE`
 - 可选 SOCKS5 用户名/密码认证
@@ -24,8 +25,7 @@ VPN 会话向 SOCKS5 层提供标准的 `DialContext`/`ListenPacket` 接口。�
 - 可退回 VPN 内普通 UDP DNS，均不会调用主机 DNS
 - macOS、Linux 和 Windows 可编译运行
 
-当前限制：仅支持 IPv4；PPP 认证目前要求服务端支持 MS-CHAPv2；不支持 SOCKS5
-UDP 分片；每次运行维护一个 L2TP 会话。
+当前限制：仅支持 IPv4；不支持 SOCKS5 UDP 分片；每次运行维护一个 L2TP 会话。
 
 ## 构建
 
@@ -58,6 +58,7 @@ curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 - `l2tp.server`：L2TP 服务器 IPv4 地址或域名
 - `l2tp.port`：L2TP UDP 端口，通常为 `1701`
 - `l2tp.username` / `l2tp.password`：PPP 凭据
+- `l2tp.auth`：`auto`、`pap`、`chap-md5` 或 `mschapv2`；默认 `auto` 接受服务端提出的受支持方式
 - `l2tp.mtu`：用户态接口 MTU，范围 `576..1400`
 - `l2tp.connectTimeout`：协商超时，例如 `30s`
 - `l2tp.dnsServer`：通过 VPN 访问的 DNS UDP 地址
@@ -98,8 +99,16 @@ docker run --rm \
 SOCKS5 客户端 → gVisor TCP/UDP → IPv4 → PPP → L2TPv2 → UDP/1701 → L2TP 服务器
 ```
 
-L2TP 控制消息使用 `Ns/Nr`、确认和重传；PPP 完成 LCP、MS-CHAPv2 与 IPCP 后，
+L2TP 控制消息使用 `Ns/Nr`、确认和重传；PPP 完成 LCP、选定的认证方式与 IPCP 后，
 分配到的 IPv4 地址被安装到进程内 gVisor 网络栈。整个过程不会触碰主机路由表。
+
+SOCKS5 UDP association 会锁定发起 TCP 控制连接的客户端 IP，并在首个 UDP 包到达时
+锁定源端口，避免其他本地客户端劫持 association。DNS 请求使用受限并发处理，UDP
+与 TCP 转发缓冲区会复用，同时 DNS 结果带有短时缓存，以降低分配次数和高并发延迟。
+
+> [!NOTE]
+> PAP 会以可恢复形式传输密码，CHAP-MD5 也属于旧式认证。纯 L2TP 本身不加密；若服务端
+> 支持，建议强制使用 `mschapv2`，或在可信/加密的外层网络中使用 `auto`。
 
 ## 许可证
 

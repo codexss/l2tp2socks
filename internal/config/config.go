@@ -21,6 +21,7 @@ type L2TP struct {
 	Port           int      `json:"port"`
 	Username       string   `json:"username"`
 	Password       string   `json:"password"`
+	Auth           string   `json:"auth"`
 	MTU            int      `json:"mtu"`
 	ConnectTimeout Duration `json:"connectTimeout"`
 	DNSServer      string   `json:"dnsServer"`
@@ -50,7 +51,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 }
 
 func Defaults() Config {
-	return Config{L2TP: L2TP{Port: 1701, MTU: 1400, ConnectTimeout: Duration{30 * time.Second}, DNSServer: "1.1.1.1:53", DoHURL: "https://cloudflare-dns.com/dns-query", DoHBootstrapIP: "1.1.1.1"}, SOCKS5: SOCKS5{Listen: "127.0.0.1:1080"}}
+	return Config{L2TP: L2TP{Port: 1701, Auth: "auto", MTU: 1400, ConnectTimeout: Duration{30 * time.Second}, DNSServer: "1.1.1.1:53", DoHURL: "https://cloudflare-dns.com/dns-query", DoHBootstrapIP: "1.1.1.1"}, SOCKS5: SOCKS5{Listen: "127.0.0.1:1080"}}
 }
 
 func Load(path string) (Config, error) {
@@ -76,6 +77,11 @@ func (c Config) Validate() error {
 	}
 	if c.L2TP.Username == "" || c.L2TP.Password == "" {
 		return errors.New("l2tp.username and l2tp.password are required")
+	}
+	switch c.L2TP.Auth {
+	case "auto", "pap", "chap", "chap-md5", "mschapv2":
+	default:
+		return errors.New("l2tp.auth must be auto, pap, chap-md5, or mschapv2")
 	}
 	if c.L2TP.Port < 1 || c.L2TP.Port > 65535 {
 		return errors.New("l2tp.port must be between 1 and 65535")

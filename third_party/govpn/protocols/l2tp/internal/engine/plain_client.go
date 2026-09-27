@@ -16,6 +16,7 @@ type PlainClientConfig struct {
 	Server   *net.UDPAddr
 	Username string
 	Password string
+	Auth     string
 	DNS      []net.IP
 	Logger   *logutil.Logger
 }
@@ -98,7 +99,7 @@ func (c *PlainClient) fail(err error) {
 
 func (c *PlainClient) SessionUp() {
 	c.mu.Lock()
-	c.ppp = ppp.New(c.cfg.Username, c.cfg.Password, c.tunnel, plainClientPPP{c})
+	c.ppp = ppp.NewWithAuth(c.cfg.Username, c.cfg.Password, c.cfg.Auth, c.tunnel, plainClientPPP{c})
 	p := c.ppp
 	c.mu.Unlock()
 	c.logger.Printf("l2tp: plain L2TP session up, starting PPP")

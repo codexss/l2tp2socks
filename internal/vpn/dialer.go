@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -33,10 +34,17 @@ type DNSConfig struct {
 type Dialer struct {
 	session Session
 	resolve func(context.Context, string) ([]net.IP, error)
+	cacheMu sync.RWMutex
+	cache   map[string]dnsCacheEntry
+}
+
+type dnsCacheEntry struct {
+	addresses []net.IP
+	expires   time.Time
 }
 
 func NewDialer(session Session, config DNSConfig) (*Dialer, error) {
-	d := &Dialer{session: session}
+	d := &Dialer{session: session, cache: make(map[string]dnsCacheEntry)}
 	if config.DoHURL != "" {
 		resolver, err := newDoHResolver(session, config.DoHURL, config.DoHBootstrapIP)
 		if err != nil {
@@ -77,6 +85,13 @@ func (d *Dialer) ListenPacket(network, address string) (net.PacketConn, error) {
 }
 
 func (d *Dialer) ResolveIPv4(ctx context.Context, host string) ([]net.IP, error) {
+	key := strings.ToLower(strings.TrimSuffix(host, "."))
+	d.cacheMu.RLock()
+	cached, found := d.cache[key]
+	d.cacheMu.RUnlock()
+	if found && time.Now().Before(cached.expires) {
+		return cloneIPs(cached.addresses), nil
+	}
 	addresses, err := d.resolve(ctx, host)
 	if err != nil {
 		return nil, err
@@ -87,7 +102,20 @@ func (d *Dialer) ResolveIPv4(ctx context.Context, host string) ([]net.IP, error)
 			result = append(result, ip)
 		}
 	}
+	if len(result) > 0 {
+		d.cacheMu.Lock()
+		d.cache[key] = dnsCacheEntry{addresses: cloneIPs(result), expires: time.Now().Add(60 * time.Second)}
+		d.cacheMu.Unlock()
+	}
 	return result, nil
+}
+
+func cloneIPs(values []net.IP) []net.IP {
+	result := make([]net.IP, len(values))
+	for index, value := range values {
+		result[index] = append(net.IP(nil), value...)
+	}
+	return result
 }
 
 type dohResolver struct {

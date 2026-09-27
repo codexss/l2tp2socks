@@ -44,6 +44,17 @@ const (
 // authMSCHAPv2 is the LCP Auth-Protocol option value for MS-CHAPv2: the CHAP
 // protocol number followed by the MS-CHAPv2 algorithm identifier.
 var authMSCHAPv2 = []byte{0xc2, 0x23, 0x81}
+var authCHAPMD5 = []byte{0xc2, 0x23, 0x05}
+var authPAP = []byte{0xc0, 0x23}
+
+type authMethod int
+
+const (
+	authMethodMSCHAPv2 authMethod = iota
+	authMethodCHAPMD5
+	authMethodPAP
+	authMethodAuto
+)
 
 // DefaultMRU is the maximum receive unit this package advertises, comfortably
 // inside a TLS record over a typical path.
@@ -115,6 +126,8 @@ type Session struct {
 	// goes straight from LCP to IPCP. SSTP servers always request auth, so this is
 	// true there and the MS-CHAPv2 path is unchanged.
 	peerRequiresAuth bool
+	authMode         authMethod
+	negotiatedAuth   authMethod
 
 	ipcpReqID                     byte
 	ipcpConfigReq                 []byte // the outstanding request, for retransmission
@@ -137,8 +150,25 @@ type Session struct {
 // New builds a PPP client session that authenticates as username/password,
 // sends frames through tr, and reports events to h.
 func New(username, password string, tr Transport, h Handler) *Session {
+	return NewWithAuth(username, password, "mschapv2", tr, h)
+}
+
+// NewWithAuth builds a PPP client with a selectable authentication method.
+// auto accepts PAP, CHAP-MD5, or MS-CHAPv2 as proposed by the peer.
+func NewWithAuth(username, password, authentication string, tr Transport, h Handler) *Session {
 	var magic [4]byte
 	_, _ = rand.Read(magic[:])
+	mode := authMethodAuto
+	switch authentication {
+	case "pap":
+		mode = authMethodPAP
+	case "chap", "chap-md5":
+		mode = authMethodCHAPMD5
+	case "mschapv2", "ms-chap-v2":
+		mode = authMethodMSCHAPv2
+	case "", "auto":
+		mode = authMethodAuto
+	}
 	return &Session{
 		username:    username,
 		password:    password,
@@ -148,6 +178,7 @@ func New(username, password string, tr Transport, h Handler) *Session {
 		lcpUseMRU:   true,
 		lcpUseMagic: true,
 		lcpMRU:      defaultMRU,
+		authMode:    mode,
 	}
 }
 
@@ -176,6 +207,8 @@ func (s *Session) Receive(frame []byte) {
 		s.handleLCP(payload)
 	case ProtocolCHAP:
 		s.handleCHAP(payload)
+	case ProtocolPAP:
+		s.handlePAP(payload)
 	case ProtocolIPCP:
 		s.handleIPCP(payload)
 	}
@@ -388,12 +421,11 @@ func (s *Session) handleLCPConfigReq(pkt cpPacket) {
 			// Acceptable: we send full frames regardless, so compression options
 			// only permit, never require, and cost us nothing to accept.
 		case optAuthProto:
-			if string(o.Value) != string(authMSCHAPv2) {
-				// We only implement MS-CHAPv2. The option is understood but its value
-				// is unacceptable, so Nak it proposing MS-CHAPv2 rather than Reject —
-				// servers such as SoftEther offer PAP first and re-offer MS-CHAPv2
-				// when Nak'd.
-				naked = append(naked, option{Type: optAuthProto, Value: authMSCHAPv2})
+			method, supported := authMethodFromOption(o.Value)
+			if supported && (s.authMode == authMethodAuto || s.authMode == method) {
+				s.negotiatedAuth = method
+			} else {
+				naked = append(naked, option{Type: optAuthProto, Value: authOption(s.preferredAuth())})
 			}
 		default:
 			rejected = append(rejected, o)
@@ -407,7 +439,7 @@ func (s *Session) handleLCPConfigReq(pkt cpPacket) {
 	case len(naked) > 0:
 		s.lcpAuthNaks++
 		if s.lcpAuthNaks > maxAuthNaks {
-			s.failLocked(fmt.Errorf("ppp: server offers no auth protocol we support (need MS-CHAPv2)"))
+			s.failLocked(fmt.Errorf("ppp: server did not accept requested authentication method"))
 			return
 		}
 		s.send(ProtocolLCP, cpPacket{Code: codeConfigureNak, ID: pkt.ID, Body: marshalOptions(naked)}.marshal())
@@ -431,6 +463,37 @@ func hasAuthProto(opts []option) bool {
 		}
 	}
 	return false
+}
+
+func authMethodFromOption(value []byte) (authMethod, bool) {
+	switch string(value) {
+	case string(authPAP):
+		return authMethodPAP, true
+	case string(authCHAPMD5):
+		return authMethodCHAPMD5, true
+	case string(authMSCHAPv2):
+		return authMethodMSCHAPv2, true
+	default:
+		return 0, false
+	}
+}
+
+func authOption(method authMethod) []byte {
+	switch method {
+	case authMethodPAP:
+		return authPAP
+	case authMethodCHAPMD5:
+		return authCHAPMD5
+	default:
+		return authMSCHAPv2
+	}
+}
+
+func (s *Session) preferredAuth() authMethod {
+	if s.authMode == authMethodAuto {
+		return authMethodMSCHAPv2
+	}
+	return s.authMode
 }
 
 // ErrLinkClosed reports an echo on a link that is no longer up.
@@ -492,7 +555,10 @@ func (s *Session) maybeLCPUp() {
 		return
 	}
 	if s.peerRequiresAuth {
-		s.phase = phaseAuth // wait for the server's MS-CHAPv2 challenge
+		s.phase = phaseAuth
+		if s.negotiatedAuth == authMethodPAP {
+			s.sendPAPRequest()
+		}
 		return
 	}
 	// No authentication was negotiated: skip straight to IPCP.
@@ -500,15 +566,59 @@ func (s *Session) maybeLCPUp() {
 	s.startIPCP()
 }
 
-// --- MS-CHAPv2 authentication ---
+// --- PAP / CHAP authentication ---
+
+func (s *Session) sendPAPRequest() {
+	if len(s.username) > 255 || len(s.password) > 255 {
+		s.failLocked(fmt.Errorf("ppp: PAP credentials exceed 255 bytes"))
+		return
+	}
+	body := make([]byte, 0, 2+len(s.username)+len(s.password))
+	body = append(body, byte(len(s.username)))
+	body = append(body, s.username...)
+	body = append(body, byte(len(s.password)))
+	body = append(body, s.password...)
+	s.send(ProtocolPAP, cpPacket{Code: papAuthenticateRequest, ID: s.nextID(), Body: body}.marshal())
+}
+
+func (s *Session) handlePAP(payload []byte) {
+	if s.phase != phaseAuth || s.negotiatedAuth != authMethodPAP {
+		return
+	}
+	pkt, ok := parseCP(payload)
+	if !ok {
+		return
+	}
+	switch pkt.Code {
+	case papAuthenticateAck:
+		var zero [mschap.NTResponseLen]byte
+		s.h.Authenticated(zero)
+		s.phase = phaseIPCP
+		s.startIPCP()
+	case papAuthenticateNak:
+		s.failLocked(fmt.Errorf("%w: %s", ErrAuth, papMessage(pkt.Body)))
+	}
+}
 
 func (s *Session) handleCHAP(payload []byte) {
+	if s.phase != phaseAuth || (s.negotiatedAuth != authMethodMSCHAPv2 && s.negotiatedAuth != authMethodCHAPMD5) {
+		return
+	}
 	pkt, ok := parseCP(payload)
 	if !ok {
 		return
 	}
 	switch pkt.Code {
 	case chapChallenge:
+		if s.negotiatedAuth == authMethodCHAPMD5 {
+			challenge, ok := parseCHAPMD5Challenge(pkt.Body)
+			if !ok {
+				s.failLocked(fmt.Errorf("ppp: malformed CHAP-MD5 challenge"))
+				return
+			}
+			s.send(ProtocolCHAP, cpPacket{Code: chapResponse, ID: pkt.ID, Body: buildCHAPMD5Response(pkt.ID, challenge, s.username, s.password)}.marshal())
+			return
+		}
 		ac, _, ok := parseChallenge(pkt.Body)
 		if !ok {
 			s.failLocked(fmt.Errorf("ppp: malformed MS-CHAPv2 challenge"))
@@ -523,6 +633,13 @@ func (s *Session) handleCHAP(payload []byte) {
 		s.peerChallenge, s.ntResponse = pc, nt
 		s.send(ProtocolCHAP, cpPacket{Code: chapResponse, ID: pkt.ID, Body: body}.marshal())
 	case chapSuccess:
+		if s.negotiatedAuth == authMethodCHAPMD5 {
+			var zero [mschap.NTResponseLen]byte
+			s.h.Authenticated(zero)
+			s.phase = phaseIPCP
+			s.startIPCP()
+			return
+		}
 		if err := verifySuccess(pkt.Body, s.authChallenge, s.peerChallenge, s.username, s.password, s.ntResponse); err != nil {
 			s.failLocked(err)
 			return

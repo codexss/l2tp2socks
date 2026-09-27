@@ -4,6 +4,7 @@
     "port": 1701,
     "username": "vpn-user",
     "password": "change-me",
+    "auth": "auto",
     "mtu": 1400,
     "connectTimeout": "30s",
     "dnsServer": "1.1.1.1:53",

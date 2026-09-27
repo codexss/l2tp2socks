@@ -32,9 +32,12 @@ type Config struct {
 	PSK          string
 	Username     string
 	Password     string
-	MTU          int
-	Timeout      time.Duration
-	Logger       *log.Logger
+	// Auth selects PPP authentication: auto, pap, chap-md5, or mschapv2.
+	// It applies to plain L2TP; the default for L2TP/IPsec remains mschapv2.
+	Auth    string
+	MTU     int
+	Timeout time.Duration
+	Logger  *log.Logger
 }
 
 // ServerConfig configures an L2TP/IPsec responder.

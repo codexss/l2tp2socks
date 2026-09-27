@@ -32,7 +32,7 @@ func (c *Client) startPlain(ctx context.Context, settings resolvedSettings) (*go
 	}
 	client := engine.NewPlainClient(conn, packetIO{ctx: runContext, device: device}, engine.PlainClientConfig{
 		Server: settings.remote, Username: c.Config.Username, Password: c.Config.Password,
-		Logger: logutil.New(logger),
+		Auth: c.Config.Auth, Logger: logutil.New(logger),
 	})
 	closeOnError := true
 	defer func() {

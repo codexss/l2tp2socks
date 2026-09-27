@@ -49,6 +49,8 @@ type Server struct {
 	logger        *log.Logger
 }
 
+var streamBufferPool = sync.Pool{New: func() any { return make([]byte, 32*1024) }}
+
 func New(listenAddress, username, password string, dialer Dialer, logger *log.Logger) *Server {
 	return &Server{listenAddress: listenAddress, username: username, password: password, dialer: dialer, logger: logger}
 }
@@ -125,7 +127,7 @@ func (s *Server) handle(ctx context.Context, client net.Conn) error {
 	case commandConnect:
 		return s.handleConnect(ctx, client, network, address)
 	case commandUDPAssociate:
-		return s.handleUDPAssociate(ctx, client)
+		return s.handleUDPAssociate(ctx, client, address)
 	default:
 		_ = writeReply(client, replyCommand, nil)
 		return errors.New("only SOCKS5 CONNECT and UDP ASSOCIATE are supported")
@@ -149,7 +151,9 @@ func (s *Server) handleConnect(ctx context.Context, client net.Conn, network, ad
 	wait.Add(2)
 	copyStream := func(destination, source net.Conn) {
 		defer wait.Done()
-		_, _ = io.Copy(destination, source)
+		buffer := streamBufferPool.Get().([]byte)
+		_, _ = io.CopyBuffer(destination, source, buffer)
+		streamBufferPool.Put(buffer)
 		if closer, ok := destination.(interface{ CloseWrite() error }); ok {
 			_ = closer.CloseWrite()
 		}
@@ -160,7 +164,7 @@ func (s *Server) handleConnect(ctx context.Context, client net.Conn, network, ad
 	return nil
 }
 
-func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error {
+func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn, requestedAddress string) error {
 	packetDialer, ok := s.dialer.(PacketDialer)
 	if !ok {
 		_ = writeReply(client, replyGeneral, nil)
@@ -177,6 +181,13 @@ func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error 
 		return fmt.Errorf("listen for SOCKS5 UDP relay: %w", err)
 	}
 	defer relay.Close()
+	_ = relay.SetReadBuffer(1 << 20)
+	_ = relay.SetWriteBuffer(1 << 20)
+	clientMatcher, err := newUDPClientMatcher(client, requestedAddress)
+	if err != nil {
+		_ = writeReply(client, replyAddress, nil)
+		return err
+	}
 
 	upstreams := make(map[string]net.PacketConn, 2)
 	for _, upstreamNetwork := range []string{"udp4", "udp6"} {
@@ -201,24 +212,28 @@ func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error 
 	_ = client.SetDeadline(time.Time{})
 
 	type datagram struct {
-		data   []byte
-		from   net.Addr
-		source string
-		err    error
+		data    []byte
+		from    net.Addr
+		source  string
+		err     error
+		release func()
 	}
-	packets := make(chan datagram, len(upstreams)+1)
+	packets := make(chan datagram, 128)
 	associationDone := make(chan struct{})
 	defer close(associationDone)
+	bufferPool := sync.Pool{New: func() any { return make([]byte, 64*1024) }}
 	readPackets := func(source string, connection net.PacketConn) {
 		for {
-			buffer := make([]byte, 64*1024)
+			buffer := bufferPool.Get().([]byte)
 			n, address, readErr := connection.ReadFrom(buffer)
-			packet := datagram{data: append([]byte(nil), buffer[:n]...), from: address, source: source, err: readErr}
+			packet := datagram{data: buffer[:n], from: address, source: source, err: readErr, release: func() { bufferPool.Put(buffer) }}
 			select {
 			case packets <- packet:
 			case <-ctx.Done():
+				packet.release()
 				return
 			case <-associationDone:
+				packet.release()
 				return
 			}
 			if readErr != nil {
@@ -231,6 +246,13 @@ func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error 
 		go readPackets(upstreamNetwork, upstream)
 	}
 	var clientUDPAddress net.Addr
+	associationCtx, cancelAssociation := context.WithCancel(ctx)
+	var forwarders sync.WaitGroup
+	defer func() {
+		cancelAssociation()
+		forwarders.Wait()
+	}()
+	forwardSlots := make(chan struct{}, 64)
 	controlClosed := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, client)
@@ -245,22 +267,39 @@ func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error 
 			return nil
 		case packet := <-packets:
 			if packet.err != nil {
+				packet.release()
 				if ctx.Err() != nil {
 					return nil
 				}
 				return fmt.Errorf("read SOCKS5 UDP %s datagram: %w", packet.source, packet.err)
 			}
 			if packet.source == "local" {
+				if !clientMatcher.accept(packet.from) {
+					packet.release()
+					continue
+				}
 				clientUDPAddress = packet.from
-				requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				err := s.forwardUDPRequest(requestCtx, packet.data, upstreams)
-				cancel()
-				if err != nil {
-					s.logger.Printf("[socks5] UDP request error: %v", err)
+				select {
+				case forwardSlots <- struct{}{}:
+					forwarders.Add(1)
+					go func(packet datagram) {
+						defer forwarders.Done()
+						defer func() { <-forwardSlots }()
+						defer packet.release()
+						requestCtx, cancel := context.WithTimeout(associationCtx, 10*time.Second)
+						defer cancel()
+						if err := s.forwardUDPRequest(requestCtx, packet.data, upstreams); err != nil && associationCtx.Err() == nil {
+							s.logger.Printf("[socks5] UDP request error: %v", err)
+						}
+					}(packet)
+				default:
+					packet.release()
+					s.logger.Printf("[socks5] UDP request dropped: association is overloaded")
 				}
 				continue
 			}
 			response, err := marshalUDPResponse(packet.from, packet.data)
+			packet.release()
 			if err != nil {
 				s.logger.Printf("[socks5] UDP response error: %v", err)
 				continue
@@ -273,6 +312,42 @@ func (s *Server) handleUDPAssociate(ctx context.Context, client net.Conn) error 
 			}
 		}
 	}
+}
+
+type udpClientMatcher struct {
+	ip   net.IP
+	port int
+}
+
+func newUDPClientMatcher(client net.Conn, requestedAddress string) (*udpClientMatcher, error) {
+	remote, ok := client.RemoteAddr().(*net.TCPAddr)
+	if !ok || remote.IP == nil {
+		return nil, errors.New("SOCKS5 client does not have a TCP remote address")
+	}
+	host, portText, err := net.SplitHostPort(requestedAddress)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UDP ASSOCIATE address: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return nil, fmt.Errorf("invalid UDP ASSOCIATE port: %w", err)
+	}
+	requestedIP := net.ParseIP(host)
+	if requestedIP != nil && !requestedIP.IsUnspecified() && !requestedIP.Equal(remote.IP) {
+		return nil, errors.New("UDP ASSOCIATE address does not match TCP client")
+	}
+	return &udpClientMatcher{ip: append(net.IP(nil), remote.IP...), port: port}, nil
+}
+
+func (m *udpClientMatcher) accept(address net.Addr) bool {
+	udp, ok := address.(*net.UDPAddr)
+	if !ok || !udp.IP.Equal(m.ip) {
+		return false
+	}
+	if m.port == 0 {
+		m.port = udp.Port
+	}
+	return udp.Port == m.port
 }
 
 func (s *Server) forwardUDPRequest(ctx context.Context, data []byte, upstreams map[string]net.PacketConn) error {

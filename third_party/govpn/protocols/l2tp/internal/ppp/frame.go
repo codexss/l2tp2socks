@@ -20,6 +20,7 @@ const (
 	ProtocolIP   = 0x0021
 	ProtocolIPCP = 0x8021
 	ProtocolLCP  = 0xc021
+	ProtocolPAP  = 0xc023
 	ProtocolCHAP = 0xc223
 )
 
