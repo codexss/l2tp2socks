@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"time"
 
 	"github.com/bclswl0827/govpn"
 	"github.com/bclswl0827/govpn/internal/packet"
@@ -53,6 +54,10 @@ func (c *Client) startPlain(ctx context.Context, settings resolvedSettings) (*go
 	if !ok || !assigned.Is4() {
 		return nil, errors.New("l2tp: PPP did not assign an IPv4 address")
 	}
+	// A UDP socket can survive a local network outage without returning an
+	// error. Active HELLO probes make that silent failure visible to Session.Wait
+	// so callers can tear down stale proxy connections and reconnect.
+	go client.MonitorLiveness(runContext, 10*time.Second, 8*time.Second)
 	done := make(chan error, 1)
 	go func() { done <- client.Wait() }()
 	closeTransport := func() error {

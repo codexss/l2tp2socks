@@ -61,6 +61,8 @@ curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 - `l2tp.auth`：`auto`、`pap`、`chap-md5` 或 `mschapv2`；默认 `auto` 接受服务端提出的受支持方式
 - `l2tp.mtu`：用户态接口 MTU，范围 `576..1400`
 - `l2tp.connectTimeout`：协商超时，例如 `30s`
+- `l2tp.reconnectInitialDelay`：断线或连接失败后的首次重试间隔，默认 `1s`
+- `l2tp.reconnectMaxDelay`：指数退避的最长重试间隔，默认 `30s`
 - `l2tp.dnsServer`：通过 VPN 访问的 DNS UDP 地址
 - `l2tp.dohUrl`：RFC 8484 DoH 地址；非空时优先使用 DoH
 - `l2tp.dohBootstrapIp`：DoH 服务的固定 IPv4 地址，防止解析 DoH 域名时先发生 DNS 泄漏或污染
@@ -76,6 +78,9 @@ curl --socks5-hostname 127.0.0.1:1080 https://ifconfig.me
 
 如需改用普通 UDP DNS，把 `dohUrl` 和 `dohBootstrapIp` 都设为空字符串；
 `dnsServer` 仍经 L2TP VPN 访问，不会走主机默认 DNS。
+
+程序每 10 秒通过 L2TP HELLO 主动检查会话。网络中断时会关闭旧 SOCKS5 客户端连接，并按上述间隔自动重拨；
+连接恢复后代理自动重新监听。等待重连期间可使用 `Ctrl+C` 立即退出。
 
 ## Docker
 

@@ -7,6 +7,8 @@
     "auth": "auto",
     "mtu": 1400,
     "connectTimeout": "30s",
+    "reconnectInitialDelay": "1s",
+    "reconnectMaxDelay": "30s",
     "dnsServer": "1.1.1.1:53",
     "dohUrl": "https://cloudflare-dns.com/dns-query",
     "dohBootstrapIp": "1.1.1.1"

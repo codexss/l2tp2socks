@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/bclswl0827/govpn/protocols/l2tp/internal/logutil"
 	"github.com/bclswl0827/govpn/protocols/l2tp/internal/mschap"
@@ -79,6 +80,33 @@ func (c *PlainClient) recvLoop() {
 
 func (c *PlainClient) Wait() error  { <-c.done; return c.closeErr }
 func (c *PlainClient) Close() error { c.fail(nil); return c.closeErr }
+
+// MonitorLiveness periodically sends an L2TP HELLO over the established
+// control channel. UDP sockets do not reliably report a vanished route or
+// peer, so without an active probe a plain L2TP session can otherwise remain
+// apparently alive forever after the network disappears.
+func (c *PlainClient) MonitorLiveness(ctx context.Context, interval, timeout time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.done:
+			return
+		case <-ticker.C:
+			probeCtx, cancel := context.WithTimeout(ctx, timeout)
+			err := c.tunnel.SendHello(probeCtx)
+			cancel()
+			if err != nil {
+				if ctx.Err() == nil {
+					c.fail(fmt.Errorf("l2tp: liveness probe failed: %w", err))
+				}
+				return
+			}
+		}
+	}
+}
 
 func (c *PlainClient) fail(err error) {
 	c.mu.Lock()

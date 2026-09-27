@@ -17,16 +17,18 @@ type Config struct {
 }
 
 type L2TP struct {
-	Server         string   `json:"server"`
-	Port           int      `json:"port"`
-	Username       string   `json:"username"`
-	Password       string   `json:"password"`
-	Auth           string   `json:"auth"`
-	MTU            int      `json:"mtu"`
-	ConnectTimeout Duration `json:"connectTimeout"`
-	DNSServer      string   `json:"dnsServer"`
-	DoHURL         string   `json:"dohUrl"`
-	DoHBootstrapIP string   `json:"dohBootstrapIp"`
+	Server                string   `json:"server"`
+	Port                  int      `json:"port"`
+	Username              string   `json:"username"`
+	Password              string   `json:"password"`
+	Auth                  string   `json:"auth"`
+	MTU                   int      `json:"mtu"`
+	ConnectTimeout        Duration `json:"connectTimeout"`
+	ReconnectInitialDelay Duration `json:"reconnectInitialDelay"`
+	ReconnectMaxDelay     Duration `json:"reconnectMaxDelay"`
+	DNSServer             string   `json:"dnsServer"`
+	DoHURL                string   `json:"dohUrl"`
+	DoHBootstrapIP        string   `json:"dohBootstrapIp"`
 }
 
 type SOCKS5 struct {
@@ -51,7 +53,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 }
 
 func Defaults() Config {
-	return Config{L2TP: L2TP{Port: 1701, Auth: "auto", MTU: 1400, ConnectTimeout: Duration{30 * time.Second}, DNSServer: "1.1.1.1:53", DoHURL: "https://cloudflare-dns.com/dns-query", DoHBootstrapIP: "1.1.1.1"}, SOCKS5: SOCKS5{Listen: "127.0.0.1:1080"}}
+	return Config{L2TP: L2TP{Port: 1701, Auth: "auto", MTU: 1400, ConnectTimeout: Duration{30 * time.Second}, ReconnectInitialDelay: Duration{time.Second}, ReconnectMaxDelay: Duration{30 * time.Second}, DNSServer: "1.1.1.1:53", DoHURL: "https://cloudflare-dns.com/dns-query", DoHBootstrapIP: "1.1.1.1"}, SOCKS5: SOCKS5{Listen: "127.0.0.1:1080"}}
 }
 
 func Load(path string) (Config, error) {
@@ -91,6 +93,12 @@ func (c Config) Validate() error {
 	}
 	if c.L2TP.ConnectTimeout.Duration <= 0 {
 		return errors.New("l2tp.connectTimeout must be positive")
+	}
+	if c.L2TP.ReconnectInitialDelay.Duration <= 0 {
+		return errors.New("l2tp.reconnectInitialDelay must be positive")
+	}
+	if c.L2TP.ReconnectMaxDelay.Duration < c.L2TP.ReconnectInitialDelay.Duration {
+		return errors.New("l2tp.reconnectMaxDelay must be at least reconnectInitialDelay")
 	}
 	if _, _, err := net.SplitHostPort(c.L2TP.DNSServer); err != nil {
 		return fmt.Errorf("invalid l2tp.dnsServer: %w", err)
