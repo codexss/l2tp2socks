@@ -1,0 +1,6 @@
+This project includes a modified copy of github.com/bclswl0827/govpn v0.2.4
+under third_party/govpn. govpn is Copyright (c) 2026 ttyAMA0 and licensed
+under the MIT License; its original LICENSE is retained in that directory.
+
+The SOCKS5 implementation is adapted from ExpTechTW/proxygate, licensed under
+GNU Affero General Public License version 3.

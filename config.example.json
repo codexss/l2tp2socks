@@ -1,0 +1,18 @@
+{
+  "l2tp": {
+    "server": "vpn.example.com",
+    "port": 1701,
+    "username": "vpn-user",
+    "password": "change-me",
+    "mtu": 1400,
+    "connectTimeout": "30s",
+    "dnsServer": "1.1.1.1:53",
+    "dohUrl": "https://cloudflare-dns.com/dns-query",
+    "dohBootstrapIp": "1.1.1.1"
+  },
+  "socks5": {
+    "listen": "127.0.0.1:1080",
+    "username": "",
+    "password": ""
+  }
+}
